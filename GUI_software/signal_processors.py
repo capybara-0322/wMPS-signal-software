@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import argparse
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -27,25 +25,27 @@ from dsp_functions import (
 )
 
 
-def build_path(pattern: str, filenum: int) -> Path:
-    if "%" in pattern:
-        return Path(pattern % filenum)
-    return Path(pattern.format(num=filenum))
-
-
-def process_one_file(
-    file_path: Path,
-    channel: str = "ch1",
+def process_one_classic(
+    signal: Signal,
+    *,
     energy_win_sec: float = 1e-6,
     detect_threshold: float = 5.0,
     dwt_level: int = 5,
     dwt_wavelet: str = "db4",
     plot_dwt_energy: bool = False,
+    verbose: bool = False,
 ) -> Dict[str, Any]:
-    sig = Signal.from_file(file_path, channel=channel)
+    """
+    Classic processing pipeline equivalent to process_signal.process_one_file,
+    but accepts an in-memory Signal object directly.
+    """
+    # 复制一份输入信号，避免原始对象被就地修改
+    sig = Signal(np.asarray(signal.data, dtype=float).copy(), float(signal.fs), dict(signal.meta))
+    # 与 MATLAB/现有脚本保持一致：先做反相，再去直流
     sig.data = -sig.data
     sig = f_remove_dc(sig, plot=False)
 
+    # 计算移动窗能量，并基于能量信号做脉冲片段检测
     sig_energy = f_moving_energy(sig, energy_win_sec, method="mean", plot=False)
     sig_frags = f_detect_pulses(
         sig,
@@ -57,12 +57,15 @@ def process_one_file(
     )
 
     n = len(sig_frags)
+    # 分别记录每个片段拟合得到的 scan/sync 时间（无效值先用 NaN 占位）
     t_scan_all = np.full(n, np.nan, dtype=float)
     t_sync_all = np.full(n, np.nan, dtype=float)
     type_all: List[str] = ["" for _ in range(n)]
 
     for i, sig_frag in enumerate(sig_frags):
+        # 片段时间需加上原始信号中的起始偏移，得到全局时间戳
         t_offset = float(sig_frag.meta.get("t_start_s", 0.0))
+        # 片段级 DWT + 能量特征，用于分类该片段类型
         sig_frag_dwt = f_signal_dwt(sig_frag, wavelet=dwt_wavelet, level=dwt_level, plot=False)
         sig_frag_dwt_eng = f_dwt_energy(
             sig_frag_dwt,
@@ -75,22 +78,28 @@ def process_one_file(
         type_all[i] = sig_frag_type
 
         if sig_frag_type == "scan":
+            # scan 脉冲：使用高斯模型拟合中心位置 mu
             try:
                 fit_paras = f_gauss_fit(sig_frag, algorithm="lsqcurvefit", plot=False)
                 t_scan_all[i] = float(fit_paras["mu"]) + t_offset
             except Exception as ex:
-                print(f"warning: fragment {i+1} (scan) fit failed: {ex}")
+                if verbose:
+                    print(f"warning: fragment {i + 1} (scan) fit failed: {ex}")
         elif sig_frag_type == "sync":
+            # sync 脉冲：使用同步脉冲模型拟合起点 t0
             try:
                 fit_paras = f_fit_sync_pulse(sig_frag, vbase0=0.0, plot=False)
                 t_sync_all[i] = float(fit_paras["t0"]) + t_offset
             except Exception as ex:
-                print(f"warning: fragment {i+1} (sync) fit failed: {ex}")
+                if verbose:
+                    print(f"warning: fragment {i + 1} (sync) fit failed: {ex}")
 
+    # 按分类结果拆分两类时间序列
     type_arr = np.asarray(type_all, dtype=object)
     t_scan = t_scan_all[type_arr == "scan"]
     t_sync = t_sync_all[type_arr == "sync"]
 
+    # 对两类脉冲分别做周期/相位分组
     t_scan_group = f_pulse_grouping(
         t_scan,
         period_tol=0.0005,
@@ -107,13 +116,14 @@ def process_one_file(
         rpm_min=1500,
         rpm_max=3000,
         plot=False,
-        verbose=True,
+        verbose=verbose,
     )
 
-    stations = f_pulse_matching(t_scan_group, t_sync_group, period_tol=0.005, verbose=True)
+    # 将 scan 组与 sync 组进行匹配，得到 station 级结果
+    stations = f_pulse_matching(t_scan_group, t_sync_group, period_tol=0.005, verbose=verbose)
 
     return {
-        "file": str(file_path),
+        "source": signal.meta.get("source", "<in-memory>"),
         "n_fragments": n,
         "t_scan": t_scan,
         "t_sync": t_sync,
@@ -121,62 +131,3 @@ def process_one_file(
         "sync_groups": t_sync_group,
         "stations": stations,
     }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Process signal files with logic equivalent to dsp_functions_matlab/test.m")
-    parser.add_argument("--files", nargs="+", type=int, default=[7], help="File numbers to process, e.g. --files 7 8")
-    parser.add_argument(
-        "--pattern",
-        type=str,
-        default="F:/研三下/大论文实验/wMPS_python/Signals/10-30实验python信号数据/00%02d.npz",
-        help="Input path pattern, supports printf style (e.g. ./dir/00%02d.npz) or format style (e.g. ./dir/{num:04d}.npz)",
-    )
-    parser.add_argument("--channel", type=str, default="ch1")
-    parser.add_argument("--plot-dwt-energy", action="store_true")
-    args = parser.parse_args()
-
-    t0 = time.time()
-
-    for filenum in args.files:
-        file_path = build_path(args.pattern, filenum)
-        if not file_path.exists():
-            print(f"skip: file not found: {file_path}")
-            continue
-
-        print(f"processing: {file_path}")
-        try:
-            result = process_one_file(
-                file_path=file_path,
-                channel=args.channel,
-                plot_dwt_energy=args.plot_dwt_energy,
-            )
-        except ImportError as ex:
-            print(f"error: {ex}")
-            print("install suggestion: conda install -n dsp pywavelets")
-            break
-
-        t_scan = result["t_scan"]
-        t_sync = result["t_sync"]
-        valid_sync = int(np.sum(np.isfinite(t_sync)))
-        valid_scan = int(np.sum(np.isfinite(t_scan)))
-
-        print(
-            f"sync: {valid_sync} valid / {t_sync.size} fragments; "
-            f"scan: {valid_scan} valid / {t_scan.size} fragments"
-        )
-        print(
-            f"groups(scan/sync): {result['scan_groups']['summary'].shape[0]}/{result['sync_groups']['summary'].shape[0]}; "
-            f"stations matched: {len(result['stations'])}"
-        )
-        for idx, st in enumerate(result["stations"], start=1):
-            print(
-                f"  station #{idx}: t1_mean={st['t1_mean']:.6f}, "
-                f"t2_meanz={st['t2_mean']:.6f}"
-            )
-
-    print(f"done in {time.time() - t0:.3f}s")
-
-
-if __name__ == "__main__":
-    main()

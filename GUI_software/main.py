@@ -1,12 +1,22 @@
 ﻿from __future__ import annotations
 
 import math
+import io
 import tkinter as tk
+from contextlib import redirect_stderr, redirect_stdout
 from tkinter import filedialog, ttk
 from typing import List, Optional
 
-from local_file_saver import load_waveform_int16_npz, save_waveform_int16_npz
+import numpy as np
+
+from local_file_saver import (
+    load_npz_payload,
+    load_signal_from_npz,
+    load_waveform_int16_npz,
+    save_waveform_int16_npz,
+)
 from rpaq_client import CaptureConfig, GenerateConfig, RpaqClient
+from signal_processors import process_one_classic
 
 MIN_X_SCALE = 0.01
 MAX_X_SCALE = 8_000_000.0
@@ -27,8 +37,10 @@ class WaveViewerApp:
 
         self.x_scale = 1.0
         self.y_scale = 1.0
-        self.signal_data: List[int] = []
+        self.signal_data: List[float] = []
         self.max_abs_value = 1.0
+        self.current_signal = None
+        self.last_process_result = None
 
         self.last_drag_x = 0.0
         self.last_drag_y = 0.0
@@ -186,8 +198,22 @@ class WaveViewerApp:
         self.info_area.pack(fill="x", pady=(2, 8))
 
         tk.Label(parent, text="Log", bg="#c4bfd3").pack(anchor="w")
-        self.log_area = tk.Text(parent, height=14, wrap="word")
-        self.log_area.pack(fill="both", expand=True, pady=(2, 0))
+        self.log_area = tk.Text(parent, height=8, wrap="word")
+        self.log_area.pack(fill="x", pady=(2, 8))
+
+        tk.Label(parent, text="Signal Process", bg="#c4bfd3").pack(anchor="w")
+        proc_row = tk.Frame(parent, bg="#c4bfd3")
+        proc_row.pack(fill="x", pady=(2, 0))
+        self.process_func_var = tk.StringVar(value="process_one_classic")
+        self.process_func_box = ttk.Combobox(
+            proc_row,
+            textvariable=self.process_func_var,
+            state="readonly",
+            values=["process_one_classic"],
+            width=18,
+        )
+        self.process_func_box.pack(side="left", fill="x", expand=True)
+        tk.Button(proc_row, text="Process", command=self.on_process_click).pack(side="left", padx=(6, 0))
 
         for area in (self.status_area, self.info_area, self.log_area):
             area.configure(state="disabled")
@@ -261,6 +287,7 @@ class WaveViewerApp:
 
         self._set_text(self.info_area, str(result.info_messages))
         self._set_signal_data(result.data)
+        self.current_signal = self._build_signal_from_current_data(source="capture")
         self._draw_signal()
 
     def on_generate_click(self) -> None:
@@ -325,10 +352,22 @@ class WaveViewerApp:
             self._set_text(self.status_area, "Please choose a file path.")
             return
         try:
-            data, fs, scale, quant_mode, meta = load_waveform_int16_npz(path)
+            sig = load_signal_from_npz(path, channel="ch1")
+            data = sig.data.tolist()
+            fs = float(sig.fs)
+            payload = load_npz_payload(path)
+            scale = float(payload["scale"]) if "scale" in payload else 1.0
+            quant_mode = str(payload["quant_mode"]) if "quant_mode" in payload else "int16_symmetric_v1"
+            meta = sig.meta.get("device", {})
+            self.current_signal = sig
         except Exception as exc:
-            self._set_text(self.status_area, f"Failed to load: {exc}")
-            return
+            try:
+                data, fs, scale, quant_mode, meta = load_waveform_int16_npz(path)
+                payload = load_npz_payload(path)
+                self.current_signal = None
+            except Exception:
+                self._set_text(self.status_area, f"Failed to load: {exc}")
+                return
         self._set_signal_data(data)
         self._draw_signal()
         if fs > 0:
@@ -341,10 +380,77 @@ class WaveViewerApp:
                     "scale": scale,
                     "quant_mode": quant_mode,
                     "meta": meta,
+                    "npz_keys": list(payload.keys()),
                 }
             ),
         )
         self._set_text(self.status_area, f"Loaded {len(data)} samples from {path}")
+        if self.current_signal is None:
+            self.current_signal = self._build_signal_from_current_data(source=path, scale=scale, meta=meta)
+
+    def on_process_click(self) -> None:
+        if not self.signal_data:
+            self._set_text(self.status_area, "No signal loaded. Please capture or load data first.")
+            return
+
+        sig = self.current_signal or self._build_signal_from_current_data(source="in-memory")
+        if sig is None:
+            self._set_text(self.status_area, "Failed to build Signal object from current data.")
+            return
+
+        proc_name = self.process_func_var.get().strip()
+        processors = {
+            "process_one_classic": process_one_classic,
+        }
+        processor = processors.get(proc_name)
+        if processor is None:
+            self._set_text(self.status_area, f"Unknown processor: {proc_name}")
+            return
+
+        self._set_text(self.status_area, f"Processing started: {proc_name}")
+        self.root.update_idletasks()
+
+        log_buf = io.StringIO()
+        try:
+            with redirect_stdout(log_buf), redirect_stderr(log_buf):
+                print(f"[process] start: {proc_name}")
+                print(f"[process] signal N={sig.N}, fs={sig.fs:g}")
+                result = processor(sig, verbose=True)
+                stations = result.get("stations", [])
+                print(f"[process] done: fragments={result.get('n_fragments', 0)}, stations={len(stations)}")
+                for idx, st in enumerate(stations, start=1):
+                    print(
+                        f"[station {idx}] "
+                        f"t1_mean={float(st.get('t1_mean', np.nan)):.6f}, "
+                        f"t2_mean={float(st.get('t2_mean', np.nan)):.6f}"
+                    )
+            self.last_process_result = result
+            self._set_text(self.status_area, f"Processing finished: {proc_name}")
+        except Exception as exc:
+            print(f"[process] error: {exc}", file=log_buf)
+            self._set_text(self.status_area, f"Processing failed: {exc}")
+
+        log_text = log_buf.getvalue().strip()
+        if log_text:
+            self._append_text(self.log_area, log_text + "\n")
+
+    def _build_signal_from_current_data(
+        self,
+        *,
+        source: str,
+        scale: float = 1.0,
+        meta: Optional[dict] = None,
+    ):
+        try:
+            from dsp_functions import Signal
+        except Exception:
+            return None
+
+        fs = self._current_fs()
+        data = np.asarray(self.signal_data, dtype=float) * float(scale)
+        merged_meta = dict(meta or {})
+        merged_meta["source"] = source
+        return Signal(data=data, fs=fs, meta=merged_meta)
 
     def _set_connection_status(self, connected: bool) -> None:
         color = "#43a047" if connected else "#9e9e9e"
@@ -419,8 +525,9 @@ class WaveViewerApp:
             v = math.sin(6 * t) * 0.7 + math.sin(20 * t) * 0.2
             data.append(int(round(v * 10000.0)))
         self._set_signal_data(data)
+        self.current_signal = self._build_signal_from_current_data(source="placeholder")
 
-    def _set_signal_data(self, data: List[int]) -> None:
+    def _set_signal_data(self, data: List[float]) -> None:
         self.signal_data = data or []
         self.max_abs_value = 1.0
         self.x_offset_samples = 0.0

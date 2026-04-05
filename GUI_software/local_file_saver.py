@@ -1,12 +1,22 @@
-﻿"""Read/write waveform data in npz format aligned with read_csv.py."""
+﻿from __future__ import annotations
 
-from __future__ import annotations
+"""Read/write waveform data in npz format, compatible with dsp_functions.Signal."""
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from dsp_functions import Signal
+except Exception:
+    Signal = None  # type: ignore[assignment]
 
 
 def save_waveform_int16_npz(
@@ -57,3 +67,20 @@ def load_waveform_int16_npz(file_path: str | Path) -> Tuple[List[int], float, fl
             meta = {}
 
     return q_values.tolist(), fs, scale, quant_mode, meta
+
+
+def load_npz_payload(file_path: str | Path) -> Dict[str, Any]:
+    """Load raw NPZ payload as a normal dict."""
+    path = Path(file_path)
+    out: Dict[str, Any] = {}
+    with np.load(path, allow_pickle=True) as z:
+        for k in z.files:
+            out[k] = z[k]
+    return out
+
+
+def load_signal_from_npz(file_path: str | Path, channel: str = "ch1"):
+    """Load npz file into a dsp_functions.Signal object."""
+    if Signal is None:
+        raise ImportError("dsp_functions.Signal is not available in current environment")
+    return Signal.from_file(file_path, channel=channel)

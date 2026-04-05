@@ -1053,8 +1053,13 @@ def f_pulse_matching(
 
             ts1 = float(min(s_a[0], s_b[0]))
             ts2 = float(max(s_a[0], s_b[0]))
-            t1_norm = (ts1 - t01) / dt
-            t2_norm = (ts2 - t01) / dt
+            t1_norm = 1.0 - (ts1 - t01) / dt
+            t2_norm = 1.0 - (ts2 - t01) / dt
+            if (t2_norm - t1_norm) > 0.5:
+                t1_norm, t2_norm = t2_norm, t1_norm
+            # With reversed normalization, enforce ascending order before validity checks.
+            if t1_norm > t2_norm:
+                t1_norm, t2_norm = t2_norm, t1_norm
             if t1_norm <= 0 or t1_norm >= 1 or t2_norm <= 0 or t2_norm >= 1 or t1_norm >= t2_norm:
                 continue
 
