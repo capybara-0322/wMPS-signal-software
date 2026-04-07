@@ -16,7 +16,7 @@ from local_file_saver import (
     save_waveform_int16_npz,
 )
 from rpaq_client import CaptureConfig, GenerateConfig, RpaqClient
-from signal_processors import process_one_classic
+from signal_processors import process_one_classic, process_one_classic_parallel
 
 MIN_X_SCALE = 0.01
 MAX_X_SCALE = 8_000_000.0
@@ -209,8 +209,8 @@ class WaveViewerApp:
             proc_row,
             textvariable=self.process_func_var,
             state="readonly",
-            values=["process_one_classic"],
-            width=18,
+            values=["process_one_classic", "process_one_classic_parallel"],
+            width=30,
         )
         self.process_func_box.pack(side="left", fill="x", expand=True)
         tk.Button(proc_row, text="Process", command=self.on_process_click).pack(side="left", padx=(6, 0))
@@ -411,6 +411,7 @@ class WaveViewerApp:
         proc_name = self.process_func_var.get().strip()
         processors = {
             "process_one_classic": process_one_classic,
+            "process_one_classic_parallel": process_one_classic_parallel,
         }
         processor = processors.get(proc_name)
         if processor is None:
