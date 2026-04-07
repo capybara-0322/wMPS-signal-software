@@ -214,6 +214,16 @@ class WaveViewerApp:
         )
         self.process_func_box.pack(side="left", fill="x", expand=True)
         tk.Button(proc_row, text="Process", command=self.on_process_click).pack(side="left", padx=(6, 0))
+        tk.Button(proc_row, text="Clear Log", command=self.on_clear_log_click).pack(side="left", padx=(6, 0))
+
+        range_row = tk.Frame(parent, bg="#c4bfd3")
+        range_row.pack(fill="x", pady=(6, 0))
+        tk.Label(range_row, text="Start", bg="#c4bfd3").pack(side="left")
+        self.process_start_var = tk.StringVar(value="1")
+        tk.Entry(range_row, textvariable=self.process_start_var, width=8).pack(side="left", padx=(4, 8))
+        tk.Label(range_row, text="End", bg="#c4bfd3").pack(side="left")
+        self.process_end_var = tk.StringVar(value="1")
+        tk.Entry(range_row, textvariable=self.process_end_var, width=8).pack(side="left", padx=(4, 0))
 
         for area in (self.status_area, self.info_area, self.log_area):
             area.configure(state="disabled")
@@ -393,9 +403,9 @@ class WaveViewerApp:
             self._set_text(self.status_area, "No signal loaded. Please capture or load data first.")
             return
 
-        sig = self.current_signal or self._build_signal_from_current_data(source="in-memory")
+        sig = self._get_selected_signal_for_processing()
         if sig is None:
-            self._set_text(self.status_area, "Failed to build Signal object from current data.")
+            self._set_text(self.status_area, "Failed to build selected Signal for processing.")
             return
 
         proc_name = self.process_func_var.get().strip()
@@ -433,6 +443,62 @@ class WaveViewerApp:
         log_text = log_buf.getvalue().strip()
         if log_text:
             self._append_text(self.log_area, log_text + "\n")
+
+    def on_clear_log_click(self) -> None:
+        self._set_text(self.log_area, "")
+
+    def _parse_process_range(self, n: int) -> Optional[tuple[int, int]]:
+        try:
+            start_1b = int((self.process_start_var.get() or "1").strip())
+            end_1b = int((self.process_end_var.get() or str(n)).strip())
+        except ValueError:
+            self._set_text(self.status_area, "Invalid process range: start/end must be integers.")
+            return None
+
+        if start_1b < 1:
+            start_1b = 1
+        if end_1b > n:
+            end_1b = n
+        if start_1b > end_1b:
+            self._set_text(self.status_area, "Invalid process range: start must be <= end.")
+            return None
+        return start_1b, end_1b
+
+    def _get_selected_signal_for_processing(self):
+        try:
+            from dsp_functions import Signal
+        except Exception:
+            self._set_text(self.status_area, "dsp_functions.Signal is not available.")
+            return None
+
+        base_sig = self.current_signal or self._build_signal_from_current_data(source="in-memory")
+        if base_sig is None:
+            return None
+
+        n = int(base_sig.N)
+        if n <= 0:
+            self._set_text(self.status_area, "Current signal is empty.")
+            return None
+
+        parsed = self._parse_process_range(n)
+        if parsed is None:
+            return None
+        start_1b, end_1b = parsed
+        i0 = start_1b - 1
+        i1 = end_1b
+
+        data = np.asarray(base_sig.data, dtype=float)[i0:i1].copy()
+        if data.size == 0:
+            self._set_text(self.status_area, "Selected range is empty.")
+            return None
+
+        meta = dict(base_sig.meta or {})
+        meta["selected_start_index_1b"] = int(start_1b)
+        meta["selected_end_index_1b"] = int(end_1b)
+        meta["original_length"] = int(n)
+        meta["selected_length"] = int(data.size)
+
+        return Signal(data=data, fs=float(base_sig.fs), meta=meta)
 
     def _build_signal_from_current_data(
         self,
@@ -537,6 +603,11 @@ class WaveViewerApp:
             abs_v = abs(float(v))
             if abs_v > self.max_abs_value:
                 self.max_abs_value = abs_v
+        n = max(1, len(self.signal_data))
+        if hasattr(self, "process_start_var"):
+            self.process_start_var.set("1")
+        if hasattr(self, "process_end_var"):
+            self.process_end_var.set(str(n))
 
     def _draw_signal(self) -> None:
         self.wave_canvas.delete("all")

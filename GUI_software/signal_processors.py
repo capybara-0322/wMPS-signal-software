@@ -54,6 +54,7 @@ def process_one_classic(
         threshold=detect_threshold,
         plot=False,
         clilog=False,
+        min_width=0.8
     )
 
     n = len(sig_frags)
@@ -106,6 +107,7 @@ def process_one_classic(
         phase_tol=0.01,
         rpm_min=1500,
         rpm_max=3000,
+        min_count=4,
         plot=False,
         verbose=False,
     )
@@ -115,6 +117,7 @@ def process_one_classic(
         phase_tol=0.01,
         rpm_min=1500,
         rpm_max=3000,
+        min_count=4,
         plot=False,
         verbose=verbose,
     )
